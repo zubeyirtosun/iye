@@ -1,0 +1,54 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: iye-config
+  namespace: iye
+  labels:
+    app.kubernetes.io/name: iye
+    app.kubernetes.io/component: log-squeezer
+data:
+  config.yaml: |
+    tailer:
+      paths:
+        - /var/log/pods/**/*.log
+      poll_interval: 100ms
+      max_line_size: 1048576
+      read_buffer_size: 65536
+      follow_symlinks: true
+      from_beginning: false
+
+    masker:
+      enabled: true
+      mask_replacement: "[MASKED]"
+      preserve_length: false
+
+    sampling:
+      enabled: true
+      error_threshold: 0.05
+      window_size: 60s
+      cooldown_period: 5m
+      min_sample_rate: 0.01
+      max_sample_rate: 1.0
+      anomaly_window_minutes: 5
+
+    metrics:
+      enabled: true
+      listen_address: ":9090"
+      metrics_path: "/metrics"
+      scrape_interval: 15s
+
+    buffer:
+      enabled: true
+      path: /var/lib/iye/buffer
+      max_size_bytes: 536870912
+      sync_writes: false
+
+    transport:
+      enabled: false
+      type: http
+      endpoint: http://collector:8080/api/logs
+      compression: zstd
+      batch_size: 1000
+      batch_timeout: 5s
+
+    log_level: info

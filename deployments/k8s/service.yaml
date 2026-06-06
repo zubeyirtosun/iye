@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: iye-metrics
+  namespace: iye
+  labels:
+    app.kubernetes.io/name: iye
+    app.kubernetes.io/component: log-squeezer
+spec:
+  selector:
+    app.kubernetes.io/name: iye
+    app.kubernetes.io/component: log-squeezer
+  ports:
+    - name: metrics
+      port: 9090
+      targetPort: 9090
+      protocol: TCP
+  type: ClusterIP
