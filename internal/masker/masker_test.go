@@ -503,3 +503,31 @@ func BenchmarkMasker(b *testing.B) {
 		m.MaskString(input)
 	}
 }
+
+func BenchmarkMasker_Mixed(b *testing.B) {
+	logger, _ := zap.NewDevelopment()
+	config := &models.MaskerConfig{
+		Enabled:         true,
+		MaskReplacement: "[MASKED]",
+	}
+
+	m, err := NewMasker(config, logger)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	lines := []string{
+		`2026-06-08T10:42:23.024Z ERROR [payment] Charge 4532-0806-0921-7768 $120.93 - declined (ref:txn_2EyHfJVMGGMd)`,
+		`2026-06-08T10:42:23.024Z INFO keystone.auth [req-WSb_wpt0JH5C0EhH] Login: user@example.com from 192.168.1.1 - success`,
+		`2026-06-08T10:42:23.024Z WARN mysql [conn-42] Slow query: SELECT * FROM users WHERE email='admin@test.com'`,
+		`2026-06-08T10:42:23.024Z INFO zookeeper [myid:1] Processing transaction: /api/v1/orders`,
+		`192.168.1.1 - - [08/Jun/2026:10:42:23 +0000] "POST /api/checkout HTTP/1.1" 200 1234`,
+		`{"level":"info","msg":"Health check passed","uptime":3600}`,
+		`2026-06-08T10:42:23.024Z DEBUG [notification] SMS delivery notification for +1-555-123-4567`,
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		m.MaskString(lines[i%len(lines)])
+	}
+}

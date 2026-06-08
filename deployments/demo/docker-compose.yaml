@@ -1,0 +1,68 @@
+services:
+  log-gen:
+    build: ./log-generator
+    user: "0"
+    volumes:
+      - app_logs:/var/log/iye
+    environment:
+      LOG_RATE: "20"
+      BURST_INTERVAL: "45"
+      BURST_DURATION: "10"
+      BURST_MULTIPLIER: "5"
+    restart: unless-stopped
+
+  iye:
+    build:
+      context: ../../
+      dockerfile: deployments/docker/Dockerfile
+    user: "0"
+    volumes:
+      - app_logs:/var/log/iye:ro
+      - buffer:/var/lib/iye/buffer
+      - ./iye.yaml:/etc/iye/config.yaml:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      - receiver
+    restart: unless-stopped
+
+  receiver:
+    build: ./receiver
+    ports:
+      - "8081:8080"
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    volumes:
+      - ./prometheus:/etc/prometheus
+    ports:
+      - "9091:9090"
+    depends_on:
+      iye:
+        condition: service_started
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.0.0
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Admin"
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_INSTALL_PLUGINS: ""
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    ports:
+      - "3000:3000"
+    depends_on:
+      prometheus:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  app_logs:
+  buffer:

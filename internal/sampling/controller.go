@@ -1,7 +1,6 @@
 package sampling
 
 import (
-	"container/list"
 	"math/rand"
 	"sync"
 	"time"
@@ -10,38 +9,29 @@ import (
 	"go.uber.org/zap"
 )
 
-type EventType int
+const maxBuckets = 12
 
-const (
-	EventTypeError EventType = iota
-	EventTypeWarning
-	EventTypeInfo
-	EventTypeDebug
-)
-
-// MetricsRecorder allows the sampling controller to report anomaly events
-// to an external metrics system without creating a dependency cycle.
 type MetricsRecorder interface {
 	RecordAnomalyEvent(eventType, source string)
 	SetSamplingMode(source string, anomalyMode bool)
 }
 
-type LogEvent struct {
-	Timestamp time.Time
-	Level     models.SeverityLevel
-	Message   string
-	Source    string
+type eventBucket struct {
+	errors uint64
+	total  uint64
 }
 
 type SamplingController struct {
-	config         *models.SamplingConfig
-	logger         *zap.Logger
-	mu             sync.RWMutex
-	eventQueue     *list.List
-	windowStart    time.Time
-	inAnomaly      bool
-	anomalyEnd     time.Time
-	stats          SamplingStats
+	config          *models.SamplingConfig
+	logger          *zap.Logger
+	mu              sync.Mutex
+	buckets         [maxBuckets]eventBucket
+	numBuckets      int
+	bucketDuration  time.Duration
+	windowStart     time.Time
+	inAnomaly       bool
+	anomalyEnd      time.Time
+	stats           SamplingStats
 	metricsRecorder MetricsRecorder
 }
 
@@ -52,12 +42,12 @@ func (s *SamplingController) SetMetricsRecorder(m MetricsRecorder) {
 }
 
 type SamplingStats struct {
-	EventsProcessed   uint64
-	ErrorsDetected    uint64
-	WarningsDetected  uint64
-	AnomalyTriggered  uint64
-	AnomalyEnded      uint64
-	SampleRate        float64
+	EventsProcessed  uint64
+	ErrorsDetected   uint64
+	WarningsDetected uint64
+	AnomalyTriggered uint64
+	AnomalyEnded     uint64
+	SampleRate       float64
 }
 
 func NewSamplingController(config *models.SamplingConfig, logger *zap.Logger) *SamplingController {
@@ -66,17 +56,30 @@ func NewSamplingController(config *models.SamplingConfig, logger *zap.Logger) *S
 		return &SamplingController{
 			config:     config,
 			logger:     logger.Named("sampling"),
-			eventQueue: list.New(),
+			numBuckets: 1,
 			inAnomaly:  false,
 		}
 	}
 
+	nb := config.WindowBuckets
+	if nb <= 0 {
+		nb = 6
+	}
+	if nb > maxBuckets {
+		nb = maxBuckets
+	}
+	bd := config.BucketDuration
+	if bd <= 0 {
+		bd = 10 * time.Second
+	}
+
 	s := &SamplingController{
-		config:     config,
-		logger:     logger.Named("sampling"),
-		eventQueue: list.New(),
-		windowStart: time.Now(),
-		inAnomaly:   false,
+		config:         config,
+		logger:         logger.Named("sampling"),
+		numBuckets:     nb,
+		bucketDuration: bd,
+		windowStart:    time.Now(),
+		inAnomaly:      false,
 		stats: SamplingStats{
 			SampleRate: config.MinSampleRate,
 		},
@@ -84,6 +87,8 @@ func NewSamplingController(config *models.SamplingConfig, logger *zap.Logger) *S
 
 	s.logger.Info("Sampling controller initialized",
 		zap.Duration("window_size", config.WindowSize),
+		zap.Int("window_buckets", nb),
+		zap.Duration("bucket_duration", bd),
 		zap.Duration("cooldown_period", config.CooldownPeriod),
 		zap.Float64("error_threshold", config.ErrorThreshold),
 		zap.Int("anomaly_window_minutes", config.AnomalyWindowMinutes),
@@ -100,42 +105,42 @@ func (s *SamplingController) ProcessEvent(level models.SeverityLevel, message, s
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	event := LogEvent{
-		Timestamp: time.Now(),
-		Level:     level,
-		Message:   message,
-		Source:    source,
+	now := time.Now()
+	s.rotateWindow(now)
+
+	idx := int(now.Sub(s.windowStart) / s.bucketDuration)
+	if idx >= s.numBuckets {
+		idx = s.numBuckets - 1
 	}
 
-	s.eventQueue.PushBack(event)
+	s.buckets[idx].total++
 	s.stats.EventsProcessed++
 
 	switch level {
 	case models.SeverityError, models.SeverityFatal, models.SeverityPanic:
+		s.buckets[idx].errors++
 		s.stats.ErrorsDetected++
 	case models.SeverityWarn:
 		s.stats.WarningsDetected++
 	}
 
-	s.cleanupOldEvents()
-	s.evaluateAnomalyState()
+	s.evaluateAnomalyState(now)
 }
 
-func (s *SamplingController) cleanupOldEvents() {
-	cutoff := time.Now().Add(-s.config.WindowSize)
-
-	for e := s.eventQueue.Front(); e != nil; {
-		next := e.Next()
-		if ev, ok := e.Value.(LogEvent); ok && ev.Timestamp.Before(cutoff) {
-			s.eventQueue.Remove(e)
-		}
-		e = next
+func (s *SamplingController) rotateWindow(now time.Time) {
+	windowDuration := time.Duration(s.numBuckets) * s.bucketDuration
+	if now.Sub(s.windowStart) < windowDuration {
+		return
 	}
+
+	for i := 0; i < s.numBuckets; i++ {
+		s.buckets[i].total = 0
+		s.buckets[i].errors = 0
+	}
+	s.windowStart = now
 }
 
-func (s *SamplingController) evaluateAnomalyState() {
-	now := time.Now()
-
+func (s *SamplingController) evaluateAnomalyState(now time.Time) {
 	if s.inAnomaly && s.config.AnomalyWindowMinutes > 0 && now.After(s.anomalyEnd) {
 		s.logger.Info("Anomaly period ended",
 			zap.Duration("duration", now.Sub(s.anomalyEnd.Add(-time.Duration(s.config.AnomalyWindowMinutes)*time.Minute))),
@@ -147,15 +152,10 @@ func (s *SamplingController) evaluateAnomalyState() {
 		return
 	}
 
-	errorCount := 0
-	totalCount := s.eventQueue.Len()
-
-	for e := s.eventQueue.Front(); e != nil; e = e.Next() {
-		if ev, ok := e.Value.(LogEvent); ok {
-			if ev.Level == models.SeverityError || ev.Level == models.SeverityFatal || ev.Level == models.SeverityPanic {
-				errorCount++
-			}
-		}
+	var totalCount, errorCount uint64
+	for _, b := range s.buckets[:s.numBuckets] {
+		totalCount += b.total
+		errorCount += b.errors
 	}
 
 	errorRatio := 0.0
@@ -164,10 +164,9 @@ func (s *SamplingController) evaluateAnomalyState() {
 	}
 
 	if s.inAnomaly {
-		// If queue is empty or error ratio dropped below threshold, exit anomaly
 		if totalCount == 0 || errorRatio < s.config.ErrorThreshold {
 			s.logger.Info("Anomaly state resolved",
-				zap.Int("total_events", totalCount),
+				zap.Uint64("total_events", totalCount),
 				zap.Float64("error_ratio", errorRatio),
 			)
 			s.inAnomaly = false
@@ -177,10 +176,10 @@ func (s *SamplingController) evaluateAnomalyState() {
 		return
 	}
 
-	if errorRatio >= s.config.ErrorThreshold {
+	if errorRatio >= s.config.ErrorThreshold && totalCount > 0 {
 		s.logger.Info("Anomaly detected",
-			zap.Int("error_count", errorCount),
-			zap.Int("total_count", totalCount),
+			zap.Uint64("error_count", errorCount),
+			zap.Uint64("total_count", totalCount),
 			zap.Float64("error_ratio", errorRatio),
 			zap.Float64("threshold", s.config.ErrorThreshold),
 		)
@@ -190,7 +189,7 @@ func (s *SamplingController) evaluateAnomalyState() {
 		}
 		s.stats.AnomalyTriggered++
 		s.reportAnomalyStarted()
-		s.updateSampleRate(1.0) // Full sampling when anomaly starts
+		s.updateSampleRate(1.0)
 	} else {
 		s.updateSampleRate(0.0)
 	}
@@ -203,32 +202,22 @@ func (s *SamplingController) updateSampleRate(forceRate float64) {
 	}
 
 	if s.inAnomaly {
-		// During anomaly, maintain full sampling
-		// Rate will be recalculated when anomaly state is exited
 		s.stats.SampleRate = 1.0
 		return
 	}
 
-	if s.eventQueue.Len() == 0 {
+	var totalCount, errorCount uint64
+	for _, b := range s.buckets[:s.numBuckets] {
+		totalCount += b.total
+		errorCount += b.errors
+	}
+
+	if totalCount == 0 {
 		s.stats.SampleRate = s.config.MinSampleRate
 		return
 	}
 
-	// Calculate dynamic sample rate based on error ratio
-	errorCount := 0
-	for e := s.eventQueue.Front(); e != nil; e = e.Next() {
-		if ev, ok := e.Value.(LogEvent); ok {
-			if ev.Level == models.SeverityError || ev.Level == models.SeverityFatal || ev.Level == models.SeverityPanic {
-				errorCount++
-			}
-		}
-	}
-
-	errorRatio := 0.0
-	if s.eventQueue.Len() > 0 {
-		errorRatio = float64(errorCount) / float64(s.eventQueue.Len())
-	}
-
+	errorRatio := float64(errorCount) / float64(totalCount)
 	s.stats.SampleRate = s.config.MinSampleRate + (errorRatio * (1.0 - s.config.MinSampleRate))
 	if s.stats.SampleRate > s.config.MaxSampleRate {
 		s.stats.SampleRate = s.config.MaxSampleRate
@@ -237,14 +226,22 @@ func (s *SamplingController) updateSampleRate(forceRate float64) {
 
 func (s *SamplingController) ShouldSample() bool {
 	if !s.config.Enabled {
-		return true // If disabled, sample everything
+		return true
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.checkAnomalyState(time.Now())
 
-	if s.eventQueue.Len() == 0 {
+	now := time.Now()
+	s.rotateWindow(now)
+	s.evaluateAnomalyState(now)
+
+	var totalCount uint64
+	for _, b := range s.buckets[:s.numBuckets] {
+		totalCount += b.total
+	}
+
+	if totalCount == 0 {
 		return s.config.MinSampleRate >= 1.0
 	}
 
@@ -254,44 +251,39 @@ func (s *SamplingController) ShouldSample() bool {
 func (s *SamplingController) GetSampleRate() float64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.checkAnomalyState(time.Now())
+	now := time.Now()
+	s.rotateWindow(now)
+	s.evaluateAnomalyState(now)
 	return s.stats.SampleRate
 }
 
 func (s *SamplingController) IsInAnomaly() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.checkAnomalyState(time.Now())
+	now := time.Now()
+	s.rotateWindow(now)
+	s.evaluateAnomalyState(now)
 	return s.inAnomaly
 }
 
-func (s *SamplingController) checkAnomalyState(now time.Time) {
-	if !s.inAnomaly {
-		return
-	}
-
-	// Clean up old events first
-	s.cleanupOldEvents()
-
-	// Re-evaluate based on current queue state
-	s.evaluateAnomalyState()
-}
-
 func (s *SamplingController) Stats() SamplingStats {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.stats
 }
 
 func (s *SamplingController) Reset() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.eventQueue.Init()
 	s.windowStart = time.Now()
 	s.inAnomaly = false
 	s.anomalyEnd = time.Time{}
 	s.stats = SamplingStats{}
 	s.stats.SampleRate = s.config.MinSampleRate
+	for i := 0; i < s.numBuckets; i++ {
+		s.buckets[i].total = 0
+		s.buckets[i].errors = 0
+	}
 	s.logger.Info("Sampling controller reset")
 }
 

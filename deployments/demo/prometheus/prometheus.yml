@@ -1,0 +1,11 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: iye
+    static_configs:
+      - targets: ["iye:9090"]
+        labels:
+          app: iye
+          service: log-processor

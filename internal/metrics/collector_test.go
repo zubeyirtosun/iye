@@ -332,6 +332,32 @@ func TestMetricsCollector_ExtractMetricsFromJSON(t *testing.T) {
 	}
 }
 
+func TestMetricsCollector_CustomMetricsFromConfig(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+	config := &models.MetricsConfig{
+		Enabled:       true,
+		ListenAddress: ":0",
+		MetricsPath:   "/metrics",
+		CustomMetrics: []models.CustomMetric{
+			{Name: "http_status", Pattern: `status=(\d+)`},
+			{Name: "response_time", Pattern: `duration=([\d.]+)ms`},
+		},
+	}
+
+	m, err := NewMetricsCollector(config, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Stop()
+
+	if _, ok := m.customPatterns["http_status"]; !ok {
+		t.Error("http_status custom metric not registered")
+	}
+	if _, ok := m.customPatterns["response_time"]; !ok {
+		t.Error("response_time custom metric not registered")
+	}
+}
+
 func TestMetricsCollector_DropLine(t *testing.T) {
 	logger, _ := zap.NewDevelopment()
 	config := &models.MetricsConfig{

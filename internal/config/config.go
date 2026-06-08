@@ -61,6 +61,10 @@ func LoadOrDefault(paths ...string) (*models.Config, error) {
 	return cfg, nil
 }
 
+func Marshal(cfg *models.Config) ([]byte, error) {
+	return yaml.Marshal(cfg)
+}
+
 func Save(config *models.Config, path string) error {
 	data, err := yaml.Marshal(config)
 	if err != nil {

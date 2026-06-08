@@ -14,6 +14,8 @@ func TestSamplingController_ProcessEvent(t *testing.T) {
 		Enabled:         true,
 		ErrorThreshold:  0.5,
 		WindowSize:      10 * time.Second,
+		WindowBuckets:   2,
+		BucketDuration:  5 * time.Second,
 		CooldownPeriod:  1 * time.Minute,
 		MinSampleRate:   0.1,
 		MaxSampleRate:   1.0,
@@ -22,7 +24,6 @@ func TestSamplingController_ProcessEvent(t *testing.T) {
 
 	s := NewSamplingController(config, logger)
 
-	// Process normal events
 	s.ProcessEvent(models.SeverityInfo, "Normal log", "test")
 	s.ProcessEvent(models.SeverityInfo, "Another normal log", "test")
 	s.ProcessEvent(models.SeverityWarn, "Warning log", "test")
@@ -40,17 +41,18 @@ func TestSamplingController_AnomalyDetection(t *testing.T) {
 	logger, _ := zap.NewDevelopment()
 	config := &models.SamplingConfig{
 		Enabled:         true,
-		ErrorThreshold:  0.5, // 50% errors trigger anomaly
+		ErrorThreshold:  0.5,
 		WindowSize:      10 * time.Second,
-		CooldownPeriod:  10 * time.Second, // Short cooldown for testing
+		WindowBuckets:   2,
+		BucketDuration:  5 * time.Second,
+		CooldownPeriod:  10 * time.Second,
 		MinSampleRate:   0.1,
 		MaxSampleRate:   1.0,
-		AnomalyWindowMinutes: 1, // 1 minute anomaly window
+		AnomalyWindowMinutes: 1,
 	}
 
 	s := NewSamplingController(config, logger)
 
-	// Process mostly error events to trigger anomaly
 	for i := 0; i < 6; i++ {
 		s.ProcessEvent(models.SeverityError, "Error log", "test")
 	}
@@ -58,7 +60,6 @@ func TestSamplingController_AnomalyDetection(t *testing.T) {
 		s.ProcessEvent(models.SeverityInfo, "Info log", "test")
 	}
 
-	// Should be in anomaly state now (6/10 = 60% errors > 50% threshold)
 	if !s.IsInAnomaly() {
 		t.Error("Expected to be in anomaly state")
 	}
@@ -67,12 +68,10 @@ func TestSamplingController_AnomalyDetection(t *testing.T) {
 		t.Errorf("Expected sample rate 1.0 during anomaly, got %f", s.GetSampleRate())
 	}
 
-	// Manually set the anomaly end time to past to simulate expiration
 	s.mu.Lock()
-	s.anomalyEnd = time.Now().Add(-1 * time.Second) // Set to past
+	s.anomalyEnd = time.Now().Add(-1 * time.Second)
 	s.mu.Unlock()
 
-	// Check state - should have exited anomaly
 	if s.IsInAnomaly() {
 		t.Error("Expected to be out of anomaly state after anomaly window")
 	}
@@ -83,19 +82,19 @@ func TestSamplingController_CleanupOldEvents(t *testing.T) {
 	config := &models.SamplingConfig{
 		Enabled:         true,
 		ErrorThreshold:  0.5,
-		WindowSize:      100 * time.Millisecond, // Very short window for testing
+		WindowSize:      100 * time.Millisecond,
+		WindowBuckets:   2,
+		BucketDuration:  50 * time.Millisecond,
 		CooldownPeriod:  10 * time.Second,
 		MinSampleRate:   0.1,
 		MaxSampleRate:   1.0,
-		AnomalyWindowMinutes: 0, // No anomaly window for immediate testing
+		AnomalyWindowMinutes: 0,
 	}
 
 	s := NewSamplingController(config, logger)
 
-	// Add an error event
 	s.ProcessEvent(models.SeverityError, "Old error", "test")
 
-	// Check initial state - should be in anomaly with max sample rate
 	if !s.IsInAnomaly() {
 		t.Error("Expected to be in anomaly state after error event")
 	}
@@ -103,18 +102,14 @@ func TestSamplingController_CleanupOldEvents(t *testing.T) {
 		t.Errorf("Expected sample rate 1.0 during anomaly, got %f", s.GetSampleRate())
 	}
 
-	// Wait for window to pass (event should be cleaned up)
 	time.Sleep(150 * time.Millisecond)
 
-	// Check if anomaly state was exited due to cleanup
 	if s.IsInAnomaly() {
 		t.Error("Expected anomaly state to be exited after event cleanup")
 	}
 
-	// Add a new info event
 	s.ProcessEvent(models.SeverityInfo, "New info", "test")
 
-	// With only the new info event, error rate should be 0%
 	if s.GetSampleRate() > config.MinSampleRate {
 		t.Errorf("Expected sample rate at minimum after cleanup, got %f", s.GetSampleRate())
 	}
@@ -126,25 +121,22 @@ func TestSamplingController_ShouldSample(t *testing.T) {
 		Enabled:         true,
 		ErrorThreshold:  0.5,
 		WindowSize:      10 * time.Second,
+		WindowBuckets:   2,
+		BucketDuration:  5 * time.Second,
 		CooldownPeriod:  1 * time.Minute,
-		MinSampleRate:   0.3, // 30% baseline sampling
+		MinSampleRate:   0.3,
 		MaxSampleRate:   1.0,
 		AnomalyWindowMinutes: 5,
 	}
 
 	s := NewSamplingController(config, logger)
 
-	// With no events, should sample at min rate
 	if config.MinSampleRate < 1.0 && s.ShouldSample() {
-		// With no events and min rate < 1.0, ShouldSample returns false (line 245)
 	}
 
-	// Add some events to get a sample rate
 	for i := 0; i < 10; i++ {
 		s.ProcessEvent(models.SeverityInfo, "Info log", "test")
 	}
-
-	// Should sample based on calculated rate
 	_ = s.ShouldSample()
 }
 
@@ -154,6 +146,8 @@ func TestSamplingController_ProbabilisticSampling(t *testing.T) {
 		Enabled:         true,
 		ErrorThreshold:  0.5,
 		WindowSize:      10 * time.Minute,
+		WindowBuckets:   2,
+		BucketDuration:  5 * time.Minute,
 		CooldownPeriod:  1 * time.Minute,
 		MinSampleRate:   0.5,
 		MaxSampleRate:   1.0,
@@ -162,12 +156,10 @@ func TestSamplingController_ProbabilisticSampling(t *testing.T) {
 
 	s := NewSamplingController(config, logger)
 
-	// Fill the queue with info events so errorRatio = 0 → SampleRate = MinSampleRate = 0.5
 	for i := 0; i < 100; i++ {
 		s.ProcessEvent(models.SeverityInfo, "Info log", "test")
 	}
 
-	// ShouldSample should return true approximately 50% of the time
 	trials := 5000
 	sampled := 0
 	for i := 0; i < trials; i++ {
@@ -177,7 +169,6 @@ func TestSamplingController_ProbabilisticSampling(t *testing.T) {
 	}
 
 	rate := float64(sampled) / float64(trials)
-	// Accept 50% ± 5% (statistical margin for 5000 trials)
 	if rate < 0.45 || rate > 0.55 {
 		t.Errorf("Expected sample rate ~0.50, got %f (%d/%d)", rate, sampled, trials)
 	}
@@ -191,16 +182,13 @@ func TestSamplingController_Disabled(t *testing.T) {
 
 	s := NewSamplingController(config, logger)
 
-	// Process events - should not affect state
 	s.ProcessEvent(models.SeverityError, "Error log", "test")
 	s.ProcessEvent(models.SeverityError, "Another error", "test")
 
-	// Should always sample when disabled
 	if !s.ShouldSample() {
 		t.Error("Should always sample when disabled")
 	}
 
-	// Should never be in anomaly when disabled
 	if s.IsInAnomaly() {
 		t.Error("Should never be in anomaly when disabled")
 	}
@@ -212,6 +200,8 @@ func TestSamplingController_Stats(t *testing.T) {
 		Enabled:         true,
 		ErrorThreshold:  0.5,
 		WindowSize:      10 * time.Second,
+		WindowBuckets:   2,
+		BucketDuration:  5 * time.Second,
 		CooldownPeriod:  1 * time.Minute,
 		MinSampleRate:   0.1,
 		MaxSampleRate:   1.0,
@@ -240,6 +230,8 @@ func TestSamplingController_Reset(t *testing.T) {
 		Enabled:         true,
 		ErrorThreshold:  0.5,
 		WindowSize:      10 * time.Second,
+		WindowBuckets:   2,
+		BucketDuration:  5 * time.Second,
 		CooldownPeriod:  1 * time.Minute,
 		MinSampleRate:   0.1,
 		MaxSampleRate:   1.0,
@@ -274,6 +266,8 @@ func BenchmarkSamplingController_ProcessEvent(b *testing.B) {
 		Enabled:         true,
 		ErrorThreshold:  0.5,
 		WindowSize:      10 * time.Second,
+		WindowBuckets:   6,
+		BucketDuration:  10 * time.Second,
 		CooldownPeriod:  1 * time.Minute,
 		MinSampleRate:   0.1,
 		MaxSampleRate:   1.0,

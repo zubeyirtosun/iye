@@ -1,0 +1,46 @@
+tailer:
+  paths:
+    - /var/log/iye/app.log
+  poll_interval: 100ms
+  max_line_size: 1048576
+  read_buffer_size: 65536
+  follow_symlinks: false
+  from_beginning: true
+
+masker:
+  enabled: true
+  mask_replacement: "[MASKED]"
+  preserve_length: false
+
+sampling:
+  enabled: true
+  error_threshold: 0.03
+  window_size: 30s
+  window_buckets: 3
+  bucket_duration: 10s
+  cooldown_period: 30s
+  min_sample_rate: 0.01
+  max_sample_rate: 1.0
+  anomaly_window_minutes: 1
+
+metrics:
+  enabled: true
+  listen_address: ":9090"
+  metrics_path: "/metrics"
+  scrape_interval: 15s
+
+buffer:
+  enabled: true
+  path: /var/lib/iye/buffer
+  max_size_bytes: 268435456
+  sync_writes: false
+
+transport:
+  enabled: true
+  type: http
+  endpoint: http://receiver:8080/api/logs
+  compression: none
+  batch_size: 50
+  batch_timeout: 2s
+
+log_level: info

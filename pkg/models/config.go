@@ -78,18 +78,26 @@ type SamplingConfig struct {
 	Enabled              bool          `yaml:"enabled" json:"enabled"`
 	ErrorThreshold       float64       `yaml:"error_threshold" json:"error_threshold"`
 	WindowSize           time.Duration `yaml:"window_size" json:"window_size"`
+	WindowBuckets        int           `yaml:"window_buckets" json:"window_buckets"`
+	BucketDuration       time.Duration `yaml:"bucket_duration" json:"bucket_duration"`
 	CooldownPeriod       time.Duration `yaml:"cooldown_period" json:"cooldown_period"`
 	MinSampleRate        float64       `yaml:"min_sample_rate" json:"min_sample_rate"`
 	MaxSampleRate        float64       `yaml:"max_sample_rate" json:"max_sample_rate"`
 	AnomalyWindowMinutes int           `yaml:"anomaly_window_minutes" json:"anomaly_window_minutes"`
 }
 
+type CustomMetric struct {
+	Name    string `yaml:"name" json:"name"`
+	Pattern string `yaml:"pattern" json:"pattern"`
+}
+
 type MetricsConfig struct {
-	Enabled        bool          `yaml:"enabled" json:"enabled"`
-	ListenAddress  string        `yaml:"listen_address" json:"listen_address"`
-	MetricsPath    string        `yaml:"metrics_path" json:"metrics_path"`
-	ScrapeInterval time.Duration `yaml:"scrape_interval" json:"scrape_interval"`
-	Buckets        []float64     `yaml:"buckets" json:"buckets"`
+	Enabled        bool            `yaml:"enabled" json:"enabled"`
+	ListenAddress  string          `yaml:"listen_address" json:"listen_address"`
+	MetricsPath    string          `yaml:"metrics_path" json:"metrics_path"`
+	ScrapeInterval time.Duration   `yaml:"scrape_interval" json:"scrape_interval"`
+	Buckets        []float64       `yaml:"buckets" json:"buckets"`
+	CustomMetrics  []CustomMetric  `yaml:"custom_metrics" json:"custom_metrics"`
 }
 
 type BufferConfig struct {
@@ -111,14 +119,24 @@ type TransportConfig struct {
 	InsecureSkipVerify bool `yaml:"insecure_skip_verify" json:"insecure_skip_verify"`
 }
 
+type PipelineConfig struct {
+	Name       string          `yaml:"name" json:"name"`
+	Paths      []string        `yaml:"paths" json:"paths"`
+	Tags       []string        `yaml:"tags" json:"tags"`
+	Compliance bool            `yaml:"compliance" json:"compliance"`
+	Masker     *MaskerConfig   `yaml:"masker" json:"masker,omitempty"`
+	Sampling   *SamplingConfig `yaml:"sampling" json:"sampling,omitempty"`
+}
+
 type Config struct {
-	Tailer    TailerConfig    `yaml:"tailer" json:"tailer"`
-	Masker    MaskerConfig    `yaml:"masker" json:"masker"`
-	Sampling  SamplingConfig  `yaml:"sampling" json:"sampling"`
-	Metrics   MetricsConfig   `yaml:"metrics" json:"metrics"`
-	Buffer    BufferConfig    `yaml:"buffer" json:"buffer"`
-	Transport TransportConfig `yaml:"transport" json:"transport"`
-	LogLevel  string          `yaml:"log_level" json:"log_level"`
+	Tailer     TailerConfig     `yaml:"tailer" json:"tailer"`
+	Masker     MaskerConfig     `yaml:"masker" json:"masker"`
+	Sampling   SamplingConfig   `yaml:"sampling" json:"sampling"`
+	Metrics    MetricsConfig    `yaml:"metrics" json:"metrics"`
+	Buffer     BufferConfig     `yaml:"buffer" json:"buffer"`
+	Transport  TransportConfig  `yaml:"transport" json:"transport"`
+	LogLevel   string           `yaml:"log_level" json:"log_level"`
+	Pipelines  []PipelineConfig `yaml:"pipelines" json:"pipelines,omitempty"`
 }
 
 func DefaultConfig() *Config {
@@ -140,6 +158,8 @@ func DefaultConfig() *Config {
 			Enabled:              true,
 			ErrorThreshold:       0.05,
 			WindowSize:           60 * time.Second,
+			WindowBuckets:        6,
+			BucketDuration:       10 * time.Second,
 			CooldownPeriod:       5 * time.Minute,
 			MinSampleRate:        0.01,
 			MaxSampleRate:        1.0,
@@ -190,6 +210,19 @@ func (c *Config) Validate() error {
 	if c.Transport.Enabled {
 		if err := c.Transport.Validate(); err != nil {
 			return fmt.Errorf("transport: %w", err)
+		}
+	}
+	for i, p := range c.Pipelines {
+		if p.Name == "" {
+			return fmt.Errorf("pipelines[%d].name is required", i)
+		}
+		if len(p.Paths) == 0 {
+			return fmt.Errorf("pipelines[%d].paths: at least one path is required", i)
+		}
+		if p.Sampling != nil {
+			if err := p.Sampling.Validate(); err != nil {
+				return fmt.Errorf("pipelines[%d].sampling: %w", i, err)
+			}
 		}
 	}
 	if c.LogLevel != "" {
@@ -249,6 +282,14 @@ func (c *MetricsConfig) Validate() error {
 	}
 	if c.ScrapeInterval <= 0 {
 		return fmt.Errorf("scrape_interval must be positive")
+	}
+	for i, cm := range c.CustomMetrics {
+		if cm.Name == "" {
+			return fmt.Errorf("custom_metrics[%d].name is required", i)
+		}
+		if cm.Pattern == "" {
+			return fmt.Errorf("custom_metrics[%d].pattern is required", i)
+		}
 	}
 	return nil
 }

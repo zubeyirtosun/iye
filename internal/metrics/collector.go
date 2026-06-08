@@ -167,17 +167,25 @@ func NewMetricsCollector(config *models.MetricsConfig, logger *zap.Logger) (*Met
 	mux.HandleFunc("/healthz", m.healthHandler)
 	mux.HandleFunc("/readyz", m.readyHandler)
 
-	m.server = &http.Server{
+	server := &http.Server{
 		Addr:         config.ListenAddress,
 		Handler:      mux,
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
+	m.server = server
+
+	for _, cm := range config.CustomMetrics {
+		if err := m.AddCustomPattern(cm.Name, cm.Pattern); err != nil {
+			return nil, fmt.Errorf("register custom metric %q: %w", cm.Name, err)
+		}
+	}
 
 	logger.Info("Metrics collector initialized",
 		zap.String("listen_address", config.ListenAddress),
 		zap.String("metrics_path", config.MetricsPath),
+		zap.Int("custom_metrics", len(config.CustomMetrics)),
 	)
 
 	return m, nil

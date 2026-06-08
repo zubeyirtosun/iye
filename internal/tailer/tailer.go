@@ -11,11 +11,21 @@ import (
 	"regexp"
 	"sync"
 	"time"
+	"unsafe"
 
 	"github.com/iye/iye/pkg/models"
 	"go.uber.org/atomic"
 	"go.uber.org/zap"
 )
+
+const poolBufSize = 64 * 1024
+
+var lineBufPool = sync.Pool{
+	New: func() interface{} {
+		b := make([]byte, poolBufSize)
+		return &b
+	},
+}
 
 var (
 	ErrTailerStopped = errors.New("tailer stopped")
@@ -305,19 +315,28 @@ func (t *Tailer) tailLoop() {
 	ticker := time.NewTicker(t.config.PollInterval)
 	defer ticker.Stop()
 
-	buf := make([]byte, t.config.MaxLineSize)
+	bp := lineBufPool.Get().(*[]byte)
+	buf := *bp
+	if cap(buf) < t.config.MaxLineSize {
+		buf = make([]byte, t.config.MaxLineSize)
+	}
+	defer func() {
+		buf = buf[:cap(buf)]
+		*bp = buf
+		lineBufPool.Put(bp)
+	}()
 
 	for {
 		select {
 		case <-t.ctx.Done():
 			return
 		case <-ticker.C:
-			t.processFiles(buf)
+			t.processFiles(&buf)
 		}
 	}
 }
 
-func (t *Tailer) processFiles(buf []byte) {
+func (t *Tailer) processFiles(buf *[]byte) {
 	t.mu.RLock()
 	files := make([]*trackedFile, 0, len(t.files))
 	for _, tf := range t.files {
@@ -330,7 +349,7 @@ func (t *Tailer) processFiles(buf []byte) {
 	}
 }
 
-func (t *Tailer) processFile(tf *trackedFile, buf []byte) {
+func (t *Tailer) processFile(tf *trackedFile, buf *[]byte) {
 	tf.mu.Lock()
 	defer tf.mu.Unlock()
 
@@ -371,14 +390,12 @@ func (t *Tailer) processFile(tf *trackedFile, buf []byte) {
 				break
 			}
 			if err == bufio.ErrBufferFull {
-				t.logger.Warn("Line exceeds buffer size, truncating",
-					zap.String("path", tf.path),
-					zap.Int("max_size", t.config.MaxLineSize),
-				)
-				t.stats.TruncatedLines.Inc()
-				line = line[:t.config.MaxLineSize-1]
-				line = append(line, '\n')
-				err = nil
+				line, err = tf.reader.ReadBytes('\n')
+				if err != nil && err != io.EOF {
+					t.logger.Error("Read error after buffer full", zap.String("path", tf.path), zap.Error(err))
+					t.stats.Errors.Inc()
+					break
+				}
 			} else {
 				t.logger.Error("Read error", zap.String("path", tf.path), zap.Error(err))
 				t.stats.Errors.Inc()
@@ -398,18 +415,32 @@ func (t *Tailer) processFile(tf *trackedFile, buf []byte) {
 			continue
 		}
 
-		if !t.shouldProcessLine(string(line)) {
+		if !t.shouldProcessLine(unsafeString(line)) {
 			continue
 		}
 
 		tf.position.Offset += int64(origLen)
 		tf.lastRead = time.Now()
 
+		// Copy line into pooled buffer; dynamically allocate if oversized
+		var content []byte
+		if len(line) <= cap(*buf) {
+			content = (*buf)[:len(line)]
+			copy(content, line)
+		} else {
+			t.logger.Debug("Line exceeds pooled buffer, dynamic allocation",
+				zap.Int("line_len", len(line)),
+				zap.Int("pool_cap", cap(*buf)),
+			)
+			content = make([]byte, len(line))
+			copy(content, line)
+		}
+
 		logLine := &models.LogLine{
 			Timestamp: time.Now(),
 			Source:    tf.path,
-			Content:   string(line),
-			Raw:       append([]byte(nil), line...),
+			Content:   unsafeString(content),
+			Raw:       content,
 			Labels:    map[string]string{"source": tf.path},
 			Severity:  models.SeverityUnknown,
 		}
@@ -417,7 +448,7 @@ func (t *Tailer) processFile(tf *trackedFile, buf []byte) {
 		select {
 		case t.output <- logLine:
 			t.stats.LinesRead.Inc()
-			t.stats.BytesRead.Add(uint64(len(line)))
+			t.stats.BytesRead.Add(uint64(len(content)))
 		case <-t.ctx.Done():
 			return
 		default:
@@ -425,6 +456,13 @@ func (t *Tailer) processFile(tf *trackedFile, buf []byte) {
 			t.stats.Errors.Inc()
 		}
 	}
+}
+
+// unsafeString converts a byte slice to string without allocation.
+// The caller must ensure the backing array is not modified while the
+// string is alive.
+func unsafeString(b []byte) string {
+	return *(*string)(unsafe.Pointer(&b))
 }
 
 func (t *Tailer) shouldProcessLine(line string) bool {
