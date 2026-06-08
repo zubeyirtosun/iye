@@ -46,27 +46,30 @@ Drop IYE in front of your existing pipeline. No infrastructure changes needed.
 
 ```
                   +-----------+
-                  | Log Files |
+                  | Log Files |  <- glob patterns, multiple paths
                   +-----+-----+
+                        |                    +-------------------+
+                  +-----v------+             | Pipeline Config   |
+                  |  Tailer(s) |  per-pipeline tailer with      |
+                  |            |  independent paths, filter rules|
+                  +-----+------+             +-------------------+
                         |
                   +-----v------+
-                  |   Tailer    |  File discovery, inode tracking,
-                  |             |  rotation detection, glob/regex
+                  |   Masker   |  18 built-in PII regex patterns,
+                  |            |  RE2-optimized, literal pre-filter,
+                  |            |  lock-free hot path, custom patterns
                   +-----+------+
                         |
                   +-----v------+
-                  |   Masker    |  18 built-in PII regex patterns,
-                  |             |  custom patterns, preserve-length
+                  |  Metrics   |  Prometheus counters/gauges,
+                  |            |  custom metric extractors,
+                  |            |  severity inference, HTTP /metrics
                   +-----+------+
                         |
                   +-----v------+
-                  |   Metrics   |  Prometheus counters/gauges,
-                  |             |  severity inference, HTTP /metrics
-                  +-----+------+
-                        |
-                  +-----v------+
-                  |  Sampling   |  Anomaly detection via error ratio,
-                  |             |  dynamic rate, cooldown periods
+                  |  Sampling  |  Bucket-based sliding window,
+                  |            |  O(1) insert/cleanup, anomaly
+                  |            |  hysteresis, per-pipeline policy
                   +-----+------+
                         |
                    +----v----+
@@ -75,13 +78,19 @@ Drop IYE in front of your existing pipeline. No infrastructure changes needed.
                    +----+----+
                         |
                   +-----v------+
-                  |  Transport  |  HTTP(S) with zstd/gzip, batching,
-                  |             |  exponential backoff, circuit breaker
+                  |  Transport |  HTTP(S) with zstd/gzip, batching,
+                  |            |  exponential backoff, circuit breaker
                   +-----+------+
                         |
                   +-----v------+
-                  |  Log Backend |  Loki, ES, Logstash, Vector, ...
-                  +-------------+
+                  | Log Backend|  Loki, ES, Logstash, Vector, ...
+                  +------------+
+
+             Compliance pipelines skip sampling entirely,
+             ensuring audit and regulatory logs never drop.
+             Each pipeline runs in its own goroutine;
+             a slow compliance pipeline cannot block
+             high-throughput application logs.
 ```
 
 ## Quick Start
@@ -91,6 +100,10 @@ Drop IYE in front of your existing pipeline. No infrastructure changes needed.
 ```bash
 # Build from source (Go 1.23+ required)
 go build -o iye ./cmd/iye
+
+# Generate a configuration interactively
+./iye init
+./iye init /etc/iye/config.yaml
 
 # Run with default configuration (reads /var/log/pods/**/*.log)
 ./iye
@@ -131,6 +144,15 @@ The DaemonSet runs IYE on every node, mounts the host filesystem log directories
 
 See [config.example.yaml](config.example.yaml) for all available options with defaults.
 
+### Interactive Wizard
+
+```bash
+./iye init                    # writes to iye.yaml
+./iye init /path/to/file.yaml # writes to specific path
+```
+
+The wizard prompts for 13 configuration values with sensible defaults shown in brackets. Press Enter to accept. Stdlib-only -- no external dependencies.
+
 ### Minimum Production Configuration
 
 ```yaml
@@ -153,6 +175,46 @@ transport:
   batch_size: 2000
   batch_timeout: 5s
 ```
+
+### Multi-Pipeline Configuration
+
+Different log sources can flow through independent pipelines with separate masking and sampling policies:
+
+```yaml
+pipelines:
+  - name: auth-audit
+    paths:
+      - /var/log/auth/*.log
+    compliance: true          # never drops, never samples
+    masker:
+      enabled: true
+
+  - name: app-microservices
+    paths:
+      - /var/log/app/*.log
+    sampling:
+      min_sample_rate: 0.01
+      error_threshold: 0.03
+```
+
+Compliance pipelines are exempt from sampling -- every audit log line is delivered. Application pipelines use adaptive sampling to reduce volume without losing signal during incidents.
+
+### Custom Metric Extraction
+
+Extract structured metrics from unstructured log lines using named regex patterns:
+
+```yaml
+metrics:
+  enabled: true
+  listen_address: ":9090"
+  custom_metrics:
+    - name: http_status
+      pattern: "status=(\\d+)"
+    - name: response_time
+      pattern: "duration=([\\d.]+)ms"
+```
+
+Each match increments a dedicated Prometheus counter (`iye_custom_http_status_matches_total`) with the pattern name and source file as labels.
 
 ## Metrics and Observability
 
@@ -197,11 +259,19 @@ Anomaly active:
 iye_current_sampling_mode > 0
 ```
 
+Custom metric rate:
+```
+rate(iye_custom_pattern_matches_total{pattern="http_status"}[1m])
+```
+
 ## Features
 
-- **Log Tailing**: Glob pattern file discovery, inode-based rotation detection (no fsnotify dependency), regex include/exclude filters, buffered reading with configurable max line size.
-- **PII Masking**: 18 built-in patterns covering AWS keys, GCP service account keys, Azure connection strings, JWT tokens, email addresses, credit card numbers, US SSNs, IPv4/IPv6 addresses, private keys (PEM), database connection strings, GitHub tokens, Slack tokens, npm/Gem tokens, SSH keys, and more. Supports custom regex patterns and optional preserve-length masking.
-- **Dynamic Sampling**: Event-driven anomaly detection based on error-to-total ratio within a sliding window. During normal operation, the sample rate adjusts to the observed error rate. When the error ratio exceeds the configured threshold, IYE enters anomaly mode and samples at 100% until the window expires or the error ratio drops.
+- **Log Tailing**: Glob pattern file discovery, inode-based rotation detection (no fsnotify dependency), regex include/exclude filters, buffered reading with configurable max line size. Lines exceeding the read buffer are read fully with `ReadBytes` fallback -- no silent truncation.
+- **PII Masking**: 18 built-in patterns covering AWS keys, GCP service account keys, JWT tokens, email addresses, credit card numbers, US SSNs, IPv4/IPv6 addresses, private keys (PEM), database connection strings, and more. RE2-optimized with `strings.Contains` literal pre-filtering that skips 12 of 18 patterns per line when no match is possible. Lock-free hot path via `atomic.Uint64` counters. Supports custom regex patterns and optional preserve-length masking.
+- **Dynamic Sampling**: Bucket-based sliding window anomaly detection with O(1) insert and cleanup. During normal operation, the sample rate adjusts to the observed error rate via a probabilistic Bernoulli gate. When the error ratio exceeds the configured threshold, IYE enters anomaly mode and samples at 100% until the window expires or the error ratio drops below 70% of the threshold (hysteresis prevents flapping). Configurable bucket count and duration for fine-grained window control.
+- **Tagged Pipelines**: Route different log sources through independent processing pipelines. Each pipeline has its own tailer, masker, and sampling controller, running in its own goroutine. Compliance-tagged pipelines skip sampling entirely -- every audit log line reaches the backend regardless of volume.
+- **Custom Metric Extractors**: Define named regex patterns in the config to extract structured counters from unstructured log text. Each match auto-registers a Prometheus counter. No code changes needed to track application-specific events.
+- **Configuration Wizard**: `iye init` generates a production-ready config interactively. Pure stdlib -- no survey or cobra dependencies.
 - **Disk Buffer**: Badger-backed persistent FIFO queue. Provides at-least-once delivery semantics. Writes are acknowledged immediately; reads are committed only after successful transport. Crash-safe -- buffered data survives process restarts.
 - **HTTP Transport**: Batched POST requests with configurable batch size and timeout. Compression via zstd or gzip. Exponential backoff with configurable maximum retries. Circuit breaker stops retrying after 10 consecutive failures to prevent buffer poisoning.
 - **TLS/mTLS**: Optional client certificate authentication with configurable CA pool and `InsecureSkipVerify`.
@@ -210,11 +280,15 @@ iye_current_sampling_mode > 0
 
 See [PERFORMANCE.md](PERFORMANCE.md) for detailed benchmark methodology, lock analysis, and architectural decisions.
 
-| Component | Per-Operation Latency | Description |
-|-----------|----------------------|-------------|
-| Masker | ~72 microseconds | 18 regex patterns on log line with PII content |
-| Metrics | ~25 microseconds | Prometheus counter increments, field extraction, label assignment |
-| Sampling | ~9 microseconds | Event queue push, cleanup, anomaly evaluation |
+| Component | Per-Operation Latency | Allocs | Description |
+|-----------|----------------------|--------|-------------|
+| Masker (dense PII) | ~46 microseconds | 39 | Single line with 4 PII types (AWS key, JWT, email, password) |
+| Masker (mixed) | ~21 microseconds | 16 | 7 realistic lines, 1-2 PII hits on average, <30µs target achieved |
+| Metrics | ~0.3 microseconds | 0 | Counter increments, label resolution, pattern matching |
+| Sampling | ~0.07 microseconds | 0 | Bucket insert, window rotation, anomaly evaluation |
+| Tailer | pool-reuse | 0 | 64KB pooled read buffer, dynamic growth for oversized lines |
+
+Benchmarks run on 11th Gen Intel Core i5-1135G7 @ 2.40GHz, Go 1.23. All packages pass with `-race`, 0 data races.
 
 ## Requirements
 
@@ -254,6 +328,8 @@ go vet ./...
 | Transport | 69.4% |
 | Tailer | 65.5% |
 
+Total: ~89 tests across 9 packages, all pass with `-race`, 0 data races.
+
 ### Project Structure
 
 ```
@@ -268,10 +344,27 @@ internal/
   config/   config.go
 pkg/models/config.go
 deployments/
+  demo/     log-generator, receiver, prometheus, grafana (docker compose)
   docker/Dockerfile
   k8s/  daemonset.yaml, configmap.yaml, rbac.yaml, service.yaml, namespace.yaml
 config.example.yaml
 ```
+
+### Demo Environment
+
+A full demo stack is available in `deployments/demo/`:
+
+```bash
+cd deployments/demo
+docker compose up -d
+```
+
+Spins up 5 containers:
+- **log-generator** -- produces synthetic log lines with PII, error bursts, and routine noise
+- **iye** -- the squeezer itself, configured to tail the generator output
+- **receiver** -- minimal HTTP endpoint that accepts and counts batches
+- **prometheus** -- scrapes iye metrics
+- **grafana** -- pre-provisioned dashboard showing sampling rate, masking ratio, and anomaly state
 
 ## License
 
