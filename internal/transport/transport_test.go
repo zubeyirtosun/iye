@@ -387,11 +387,14 @@ func TestTransport_BatchPayloadCompressedFlag(t *testing.T) {
 		t.Fatalf("Failed to unmarshal payload: %v\nBody: %s", err, string(payloadBody))
 	}
 
-	if !payload.Compressed {
-		t.Errorf("Expected compressed=true in JSON payload, got false. Body: %s", string(payloadBody))
+	if payload.Compressed {
+		t.Errorf("Expected compressed=false for none compressor, got true. Body: %s", string(payloadBody))
 	}
 	if payload.Algorithm != "none" {
 		t.Errorf("Expected algorithm 'none', got '%s'", payload.Algorithm)
+	}
+	if len(payload.Entries) == 0 {
+		t.Error("Expected at least one entry in payload")
 	}
 	if payload.Count != 3 {
 		t.Errorf("Expected count 3, got %d", payload.Count)

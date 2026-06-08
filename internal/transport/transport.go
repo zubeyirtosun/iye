@@ -276,7 +276,7 @@ func (t *Transport) sendBatch() {
 	payload := batchPayload{
 		Entries:    batch,
 		Count:      len(batch),
-		Compressed: true,
+		Compressed: t.compressor.Name() != "none",
 		Algorithm:  t.compressor.Name(),
 	}
 
@@ -387,7 +387,7 @@ func (t *Transport) flushBatch() {
 	payload := batchPayload{
 		Entries:    batch,
 		Count:      len(batch),
-		Compressed: true,
+		Compressed: t.compressor.Name() != "none",
 		Algorithm:  t.compressor.Name(),
 	}
 
