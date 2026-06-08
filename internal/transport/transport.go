@@ -274,9 +274,10 @@ func (t *Transport) sendBatch() {
 	t.mu.Unlock()
 
 	payload := batchPayload{
-		Entries:   batch,
-		Count:     len(batch),
-		Algorithm: t.compressor.Name(),
+		Entries:    batch,
+		Count:      len(batch),
+		Compressed: true,
+		Algorithm:  t.compressor.Name(),
 	}
 
 	jsonData, err := json.Marshal(payload)
@@ -290,8 +291,6 @@ func (t *Transport) sendBatch() {
 		t.logger.Error("Failed to compress batch", zap.Error(err))
 		return
 	}
-
-	payload.Compressed = true
 
 	if err := t.sendWithRetry(compressed); err != nil {
 		t.logger.Error("Failed to send batch",
@@ -386,9 +385,10 @@ func (t *Transport) flushBatch() {
 	}
 
 	payload := batchPayload{
-		Entries:   batch,
-		Count:     len(batch),
-		Algorithm: t.compressor.Name(),
+		Entries:    batch,
+		Count:      len(batch),
+		Compressed: true,
+		Algorithm:  t.compressor.Name(),
 	}
 
 	jsonData, err := json.Marshal(payload)
@@ -402,8 +402,6 @@ func (t *Transport) flushBatch() {
 		t.logger.Error("Failed to compress final batch", zap.Error(err))
 		return
 	}
-
-	payload.Compressed = true
 
 	if err := t.sendWithRetry(compressed); err != nil {
 		t.logger.Error("Failed to send final batch, returning to buffer",

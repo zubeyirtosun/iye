@@ -256,12 +256,7 @@ func processLogLine(line *models.LogLine, m *masker.Masker, metricsCollector *me
 		}
 	}
 
-	// Step 2: Update metrics (always run if collector is available)
-	if metricsCollector != nil {
-		metricsCollector.ProcessLine(maskedLine)
-	}
-
-	// Step 3: Sampling decision
+	// Step 2: Sampling decision (must happen before metrics so Sampled flag is correct)
 	var shouldSample bool
 	if samplingController != nil {
 		samplingController.ProcessEvent(maskedLine.Severity, maskedLine.Content, maskedLine.Source)
@@ -270,10 +265,18 @@ func processLogLine(line *models.LogLine, m *masker.Masker, metricsCollector *me
 		shouldSample = true
 	}
 
-	if !shouldSample {
-		if metricsCollector != nil {
+	maskedLine.Sampled = shouldSample
+
+	// Step 3: Update metrics (always run if collector is available — reads Sampled flag)
+	if metricsCollector != nil {
+		metricsCollector.ProcessLine(maskedLine)
+
+		if !shouldSample {
 			metricsCollector.DropLine(maskedLine.Source)
 		}
+	}
+
+	if !shouldSample {
 		return nil
 	}
 
@@ -297,7 +300,6 @@ func processLogLine(line *models.LogLine, m *masker.Masker, metricsCollector *me
 		}
 	}
 
-	maskedLine.Sampled = true
 	return maskedLine
 }
 

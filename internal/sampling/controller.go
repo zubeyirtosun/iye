@@ -2,6 +2,7 @@ package sampling
 
 import (
 	"container/list"
+	"math/rand"
 	"sync"
 	"time"
 
@@ -123,10 +124,12 @@ func (s *SamplingController) ProcessEvent(level models.SeverityLevel, message, s
 func (s *SamplingController) cleanupOldEvents() {
 	cutoff := time.Now().Add(-s.config.WindowSize)
 
-	for e := s.eventQueue.Front(); e != nil; e = e.Next() {
+	for e := s.eventQueue.Front(); e != nil; {
+		next := e.Next()
 		if ev, ok := e.Value.(LogEvent); ok && ev.Timestamp.Before(cutoff) {
 			s.eventQueue.Remove(e)
 		}
+		e = next
 	}
 }
 
@@ -245,7 +248,7 @@ func (s *SamplingController) ShouldSample() bool {
 		return s.config.MinSampleRate >= 1.0
 	}
 
-	return s.stats.SampleRate >= 1.0 || s.stats.SampleRate >= s.config.MinSampleRate
+	return s.stats.SampleRate >= 1.0 || rand.Float64() < s.stats.SampleRate
 }
 
 func (s *SamplingController) GetSampleRate() float64 {
@@ -288,7 +291,7 @@ func (s *SamplingController) Reset() {
 	s.inAnomaly = false
 	s.anomalyEnd = time.Time{}
 	s.stats = SamplingStats{}
-	s.stats.SampleRate = s.config.MaxSampleRate
+	s.stats.SampleRate = s.config.MinSampleRate
 	s.logger.Info("Sampling controller reset")
 }
 

@@ -259,8 +259,8 @@ func (t *Tailer) addFileLocked(path string) error {
 		return errors.New("path is a directory")
 	}
 
+	inode := getInode(info)
 	var offset int64 = 0
-	var inode uint64
 
 	if !t.config.FromBeginning {
 		offset = info.Size()
@@ -386,6 +386,7 @@ func (t *Tailer) processFile(tf *trackedFile, buf []byte) {
 			}
 		}
 
+		origLen := len(line)
 		if len(line) > 0 && line[len(line)-1] == '\n' {
 			line = line[:len(line)-1]
 		}
@@ -401,7 +402,7 @@ func (t *Tailer) processFile(tf *trackedFile, buf []byte) {
 			continue
 		}
 
-		tf.position.Offset += int64(len(line)) + 1
+		tf.position.Offset += int64(origLen)
 		tf.lastRead = time.Now()
 
 		logLine := &models.LogLine{

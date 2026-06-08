@@ -2,6 +2,8 @@ package transport
 
 import (
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -326,6 +328,73 @@ func TestTransport_BuildTLSConfig_MissingCert(t *testing.T) {
 	_, err := buildTLSConfig(config)
 	if err == nil {
 		t.Error("Expected error when TLS cert is missing")
+	}
+}
+
+func TestTransport_BatchPayloadCompressedFlag(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+	buf, cleanup := newTestBuffer(t)
+	defer cleanup()
+
+	for i := 0; i < 3; i++ {
+		entry := models.LogEntry{
+			Timestamp: time.Now().Format(time.RFC3339Nano),
+			Source:    "test",
+			Message:   "test message",
+			Level:     "info",
+		}
+		if err := buf.Write(entry); err != nil {
+			t.Fatalf("Failed to write to buffer: %v", err)
+		}
+	}
+
+	var payloadBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		payloadBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("Failed to read body: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	config := &models.TransportConfig{
+		Enabled:      true,
+		Endpoint:     server.URL,
+		Compression:  "none",
+		BatchSize:    10,
+		BatchTimeout: 50 * time.Millisecond,
+	}
+
+	tr, err := NewTransport(config, logger, buf, &mockMetricsCollector{})
+	if err != nil {
+		t.Fatalf("Failed to create transport: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tr.Start(ctx)
+	time.Sleep(200 * time.Millisecond)
+	tr.Stop()
+
+	if payloadBody == nil {
+		t.Fatal("Expected server to receive request body")
+	}
+
+	var payload batchPayload
+	if err := json.Unmarshal(payloadBody, &payload); err != nil {
+		t.Fatalf("Failed to unmarshal payload: %v\nBody: %s", err, string(payloadBody))
+	}
+
+	if !payload.Compressed {
+		t.Errorf("Expected compressed=true in JSON payload, got false. Body: %s", string(payloadBody))
+	}
+	if payload.Algorithm != "none" {
+		t.Errorf("Expected algorithm 'none', got '%s'", payload.Algorithm)
+	}
+	if payload.Count != 3 {
+		t.Errorf("Expected count 3, got %d", payload.Count)
 	}
 }
 
